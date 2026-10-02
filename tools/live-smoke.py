@@ -100,10 +100,10 @@ panel.querySelector('.fab').click();
 (await wait(() => panel.querySelector(".quick-choice[title='Voice']"), 5000)).click();
 const start = await wait(() => panel.querySelector("[aria-label='Start recording']") || panel.querySelector("[aria-label='Stop recording']"), 5000);
 if (start.getAttribute('aria-label') === 'Start recording') start.click();
-await new Promise(r => setTimeout(r, 5000));
+await new Promise(r => setTimeout(r, 1500));
 (await wait(() => panel.querySelector("[aria-label='Stop recording']"), 5000)).click();
 const line = () => panel.innerText.split(String.fromCharCode(10)).find(l => /Task created|nothing was recorded|fail/i.test(l));
-const done = await wait(line, 90000);
+const done = await wait(() => line() || (panel.querySelectorAll('.task').length > before && 'a task was made'), 90000);
 return JSON.stringify({ rec: String(window.MediaRecorder).slice(0, 60), bridge: typeof window.__codelovesmeAudio, handler: !!(window.webkit && webkit.messageHandlers && webkit.messageHandlers.codelovesmeAudio), said: done || 'no answer in 90 s', tasks: panel.querySelectorAll('.task').length - before });
 """
 
@@ -119,7 +119,11 @@ def voice():
             answer = view.call_async_javascript_function_finish(result).to_string()
         except GLib.Error as error:
             answer = "error " + error.message
-        finish(0 if "Task created" in answer else 1, "voice: " + answer)
+        try:
+            made = json.loads(answer).get("tasks", 0)
+        except ValueError:
+            made = 0
+        finish(0 if made >= 1 else 1, "voice: " + answer)
 
     window.web.call_async_javascript_function(VOICE, -1, None, None, None, None, heard)
 

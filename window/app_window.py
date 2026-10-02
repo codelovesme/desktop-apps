@@ -114,11 +114,36 @@ RECORDER_JS = r"""
   if (!port) return;
   const Native = window.MediaRecorder;
   const pending = new Map();
+  const asking = new Map();
   let next = 1;
   window.__codelovesmeAudio = {
     done(id, b64) { const r = pending.get(id); if (r) { pending.delete(id); r._finish(b64); } },
     failed(id, message) { const r = pending.get(id); if (r) { pending.delete(id); r._fail(message); } },
+    allowed(id, yes) {
+      const a = asking.get(id);
+      if (!a) return;
+      asking.delete(id);
+      if (!yes) { a.reject(new DOMException('The microphone was not allowed.', 'NotAllowedError')); return; }
+      // The window records, so WebKit's own capture (5 s to open the first
+      // time, 1 s after) is not started, nor its audio engine (1.5 s for a
+      // silent track): the page is handed an empty stream at once.
+      a.resolve(new MediaStream());
+    },
   };
+  // Sound alone is asked of the window; anything with video stays WebKit's.
+  // On the prototype: navigator.mediaDevices may not exist yet this early.
+  const Devices = window.MediaDevices && MediaDevices.prototype;
+  if (Devices && Devices.getUserMedia) {
+    const real = Devices.getUserMedia;
+    Devices.getUserMedia = function (constraints) {
+      if (!constraints || !constraints.audio || constraints.video) return real.call(this, constraints);
+      return new Promise((resolve, reject) => {
+        const id = next++;
+        asking.set(id, { resolve, reject });
+        port.postMessage(JSON.stringify({ op: 'allow', id }));
+      });
+    };
+  }
   class WindowRecorder extends EventTarget {
     constructor(stream) {
       super();
@@ -305,21 +330,24 @@ class AppWindow:
     # -- camera, microphone, notifications: asked once, a yes kept ----------
 
     def permission_request(self, _view, request) -> bool:
-        Gtk = self.Gtk
         kind = request.__class__.__name__
         if not trusted_origin(self.web.get_uri() or "", self.origin):
             request.deny()
             return True
+        request.allow() if self.ask(kind) else request.deny()
+        return True
+
+    def ask(self, kind: str) -> bool:
+        """The person's answer for `kind`: kept, or asked now."""
+        Gtk = self.Gtk
         if kind in self.allowed:
-            request.allow() if self.allowed[kind] else request.deny()
-            return True
+            return self.allowed[kind]
         words = {
             "UserMediaPermissionRequest": "the camera or microphone",
             "NotificationPermissionRequest": "notifications",
         }.get(kind)
         if words is None:
-            request.deny()
-            return True
+            return False
         question = Gtk.MessageDialog(
             transient_for=self.window, modal=True, message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO, text=f"Allow {self.name} to use {words}?",
@@ -329,8 +357,7 @@ class AppWindow:
         self.allowed[kind] = approved
         if approved:
             save_approval(self.approvals_path, kind)
-        request.allow() if approved else request.deny()
-        return True
+        return approved
 
     # -- recording sound for the page ----------------------------------------
 
@@ -342,7 +369,10 @@ class AppWindow:
             return
         if not trusted_origin(self.web.get_uri() or "", self.origin):
             return
-        if op == "start":
+        if op == "allow":
+            yes = self.ask("UserMediaPermissionRequest")
+            self.web.run_javascript(f"window.__codelovesmeAudio && __codelovesmeAudio.allowed({rid}, {'true' if yes else 'false'})", None, None)
+        elif op == "start":
             self.start_recording(rid)
         elif op == "stop":
             self.stop_recording(rid)
