@@ -31,6 +31,12 @@ The camera and microphone (To Do's photo and voice capture) are asked for
 once: a yes is remembered (in `~/.local/share/codelovesme/<app>/permissions.json`;
 delete it to be asked again), a no only until the window closes. Downloads go to your Downloads folder.
 
+Sound is recorded by the window, with the system's own recorder
+(`pw-record`, else `arecord`): WebKitGTK's recorder hands back nothing on a
+stock Debian 13 desktop (it needs GStreamer's fmp4 plugin, which Debian
+does not package). The page's MediaRecorder is replaced for audio by one
+that asks the window; the page still asks for the microphone first.
+
 ## How it works
 
 `window/app_window.py` is one WebKitGTK window shared by every
@@ -50,6 +56,8 @@ CODELOVESME_HOST_URL=http://127.0.0.1:8923 /usr/bin/python3 window/app_window.py
 ```
 
 `tools/live-smoke.py` opens the real window against a running host, signs
-in through it and saves a picture (see its header). Adding an application
+in through it and saves a picture (see its header); with `E2E_VOICE=1` and
+`CODELOVESME_TEST_AUDIO=<a spoken .wav>` it makes a To Do voice task end to
+end, the file standing in for the microphone. Adding an application
 is a new `apps/<app>/` with `app.conf` and an icon, a line in the release
 workflow, and a package entry in CDLVSM.

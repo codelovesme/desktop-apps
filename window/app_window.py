@@ -21,7 +21,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+import base64
 import secrets
+import shutil
+import signal
+import subprocess
+import tempfile
 import threading
 from urllib.parse import parse_qs, urlencode, urlsplit
 import webbrowser
@@ -94,6 +99,83 @@ def browser_sign_in(target: str) -> bool:
     except ValueError:
         return False
     return parts.scheme == "https" and parts.hostname in BROWSER_SIGN_IN_HOSTS
+
+
+# WebKitGTK cannot record audio on a stock Debian 13 desktop: its recorder
+# needs GStreamer's fmp4 plugin (gst-plugins-rs, not packaged there) and hands
+# back nothing, and its capture can agree on a format that is all silence. So
+# the window records itself, with the system's own recorder, and the page's
+# MediaRecorder is replaced for audio by one that asks the window. The page
+# still asks for the microphone first (getUserMedia), so the permission is the
+# same one; a recording with video keeps WebKit's own recorder.
+RECORDER_JS = r"""
+(() => {
+  const port = window.webkit && webkit.messageHandlers && webkit.messageHandlers.codelovesmeAudio;
+  if (!port) return;
+  const Native = window.MediaRecorder;
+  const pending = new Map();
+  let next = 1;
+  window.__codelovesmeAudio = {
+    done(id, b64) { const r = pending.get(id); if (r) { pending.delete(id); r._finish(b64); } },
+    failed(id, message) { const r = pending.get(id); if (r) { pending.delete(id); r._fail(message); } },
+  };
+  class WindowRecorder extends EventTarget {
+    constructor(stream) {
+      super();
+      this.stream = stream; this.mimeType = 'audio/wav'; this.state = 'inactive'; this.id = next++;
+      this.ondataavailable = null; this.onstop = null; this.onerror = null; this.onstart = null;
+    }
+    static isTypeSupported(type) { return /^audio\/wav/.test(String(type)); }
+    start() {
+      if (this.state !== 'inactive') throw new DOMException('already recording', 'InvalidStateError');
+      this.state = 'recording';
+      pending.set(this.id, this);
+      port.postMessage(JSON.stringify({ op: 'start', id: this.id }));
+      this._emit('start', new Event('start'));
+    }
+    stop() {
+      if (this.state === 'inactive') return;
+      this.state = 'inactive';
+      port.postMessage(JSON.stringify({ op: 'stop', id: this.id }));
+    }
+    pause() {} resume() {} requestData() {}
+    _emit(type, event) {
+      const handler = this['on' + type];
+      if (typeof handler === 'function') handler.call(this, event);
+      this.dispatchEvent(event);
+    }
+    _finish(b64) {
+      const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const event = new Event('dataavailable');
+      event.data = new Blob([bytes], { type: 'audio/wav' });
+      this._emit('dataavailable', event);
+      this._emit('stop', new Event('stop'));
+    }
+    _fail(message) {
+      this.state = 'inactive';
+      const event = new Event('error');
+      event.error = new DOMException(message);
+      this._emit('error', event);
+      this._emit('stop', new Event('stop'));
+    }
+  }
+  const Recorder = function (stream, options) {
+    if (Native && stream && stream.getVideoTracks && stream.getVideoTracks().length) return new Native(stream, options);
+    return new WindowRecorder(stream, options);
+  };
+  Recorder.isTypeSupported = (type) => WindowRecorder.isTypeSupported(type) || (Native ? Native.isTypeSupported(type) : false);
+  window.MediaRecorder = Recorder;
+})();
+"""
+
+
+def recorder_command(path: Path) -> list[str] | None:
+    """The system's own recorder, 16 kHz mono 16-bit WAV — what speech wants."""
+    if shutil.which("pw-record"):
+        return ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", str(path)]
+    if shutil.which("arecord"):
+        return ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", str(path)]
+    return None
 
 
 def load_approvals(path: Path) -> dict:
@@ -171,7 +253,18 @@ class AppWindow:
         manager = WebKit2.WebsiteDataManager(base_data_directory=str(data), base_cache_directory=str(cache))
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         context.connect("download-started", self.download_started)
-        self.web = WebKit2.WebView.new_with_context(context)
+        content = WebKit2.UserContentManager()
+        # Every page the window holds is the host's (decide_policy keeps it so),
+        # and the window answers only while its page is on the host.
+        content.add_script(WebKit2.UserScript(
+            RECORDER_JS, WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserScriptInjectionTime.START, None, None,
+        ))
+        content.register_script_message_handler("codelovesmeAudio")
+        content.connect("script-message-received::codelovesmeAudio", self.audio_message)
+        self.recording = None
+        self.audio_dir = tempfile.TemporaryDirectory(prefix="codelovesme-audio-")
+        self.web = WebKit2.WebView(web_context=context, user_content_manager=content)
         self.web.connect("decide-policy", self.decide_policy)
         self.web.connect("load-failed", self.load_failed)
         self.web.connect("permission-request", self.permission_request)
@@ -238,6 +331,77 @@ class AppWindow:
             save_approval(self.approvals_path, kind)
         request.allow() if approved else request.deny()
         return True
+
+    # -- recording sound for the page ----------------------------------------
+
+    def audio_message(self, _manager, message) -> None:
+        try:
+            asked = json.loads(message.get_js_value().to_string())
+            op, rid = asked["op"], int(asked["id"])
+        except (ValueError, KeyError, TypeError):
+            return
+        if not trusted_origin(self.web.get_uri() or "", self.origin):
+            return
+        if op == "start":
+            self.start_recording(rid)
+        elif op == "stop":
+            self.stop_recording(rid)
+
+    def start_recording(self, rid: int) -> None:
+        if not self.allowed.get("UserMediaPermissionRequest"):
+            self.audio_failed(rid, "the microphone was not allowed")
+            return
+        self.drop_recording()
+        path = Path(self.audio_dir.name) / f"recording-{rid}.wav"
+        test_audio = os.environ.get("CODELOVESME_TEST_AUDIO", "")
+        if test_audio:
+            # Tests stand a file in for the microphone; nothing is started.
+            shutil.copyfile(test_audio, path)
+            self.recording = (rid, None, path)
+            return
+        command = recorder_command(path)
+        if command is None:
+            self.audio_failed(rid, "no recorder on this computer (pw-record or arecord)")
+            return
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.audio_failed(rid, f"the recorder did not start: {error}")
+            return
+        self.recording = (rid, process, path)
+
+    def stop_recording(self, rid: int) -> None:
+        if self.recording is None or self.recording[0] != rid:
+            self.audio_failed(rid, "nothing was recording")
+            return
+        _, process, path = self.recording
+        self.recording = None
+        if process is not None:
+            process.send_signal(signal.SIGINT)  # lets the recorder finish its file
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        try:
+            data = path.read_bytes()
+            path.unlink()
+        except OSError:
+            data = b""
+        if len(data) <= 44:  # a WAV header and no sound
+            self.audio_failed(rid, "the microphone gave no sound")
+            return
+        encoded = base64.b64encode(data).decode("ascii")
+        self.web.run_javascript(f"window.__codelovesmeAudio && __codelovesmeAudio.done({rid}, '{encoded}')", None, None)
+
+    def audio_failed(self, rid: int, message: str) -> None:
+        self.web.run_javascript(f"window.__codelovesmeAudio && __codelovesmeAudio.failed({rid}, {json.dumps(message)})", None, None)
+
+    def drop_recording(self) -> None:
+        if self.recording is not None:
+            _, process, _ = self.recording
+            if process is not None:
+                process.kill()
+            self.recording = None
 
     # -- downloads land in ~/Downloads ---------------------------------------
 
@@ -322,6 +486,7 @@ class AppWindow:
         return False
 
     def close(self, *_args) -> None:
+        self.drop_recording()
         self.callback.shutdown()
         self.callback.server_close()
         self.Gtk.main_quit()

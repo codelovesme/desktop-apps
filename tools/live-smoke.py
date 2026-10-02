@@ -84,10 +84,44 @@ def tick():
                 finish(1, f"FAIL: landed on {path}")
             elif hub:
                 finish(1, "FAIL: the hub is showing")
+            elif os.environ.get("E2E_VOICE") == "1" and app == "todo":
+                voice()
             else:
                 finish(0, f"OK: {config['name']} at {path}, no hub")
     run("JSON.stringify({ready: !!document.querySelector('#guest-panel %s'), path: location.pathname, hub: document.querySelectorAll('#hub-container .app').length})" % ready, checked)
     return True
+
+
+VOICE = """
+const panel = document.querySelector('#guest-panel');
+const wait = async (find, ms) => { const t = Date.now(); while (Date.now() - t < ms) { const el = find(); if (el) return el; await new Promise(r => setTimeout(r, 200)); } return null; };
+const before = panel.querySelectorAll('.task').length;
+panel.querySelector('.fab').click();
+(await wait(() => panel.querySelector(".quick-choice[title='Voice']"), 5000)).click();
+const start = await wait(() => panel.querySelector("[aria-label='Start recording']") || panel.querySelector("[aria-label='Stop recording']"), 5000);
+if (start.getAttribute('aria-label') === 'Start recording') start.click();
+await new Promise(r => setTimeout(r, 5000));
+(await wait(() => panel.querySelector("[aria-label='Stop recording']"), 5000)).click();
+const line = () => panel.innerText.split(String.fromCharCode(10)).find(l => /Task created|nothing was recorded|fail/i.test(l));
+const done = await wait(line, 90000);
+return JSON.stringify({ rec: String(window.MediaRecorder).slice(0, 60), bridge: typeof window.__codelovesmeAudio, handler: !!(window.webkit && webkit.messageHandlers && webkit.messageHandlers.codelovesmeAudio), said: done || 'no answer in 90 s', tasks: panel.querySelectorAll('.task').length - before });
+"""
+
+
+def voice():
+    if steps.get("voicing"):
+        return
+    steps["voicing"] = True
+    steps["n"] = -400  # the model takes its time
+
+    def heard(view, result):
+        try:
+            answer = view.call_async_javascript_function_finish(result).to_string()
+        except GLib.Error as error:
+            answer = "error " + error.message
+        finish(0 if "Task created" in answer else 1, "voice: " + answer)
+
+    window.web.call_async_javascript_function(VOICE, -1, None, None, None, None, heard)
 
 
 GLib.timeout_add(500, tick)
