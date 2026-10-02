@@ -1,0 +1,16 @@
+#!/bin/sh
+# Start one codelovesme application in its own window. Packaged once per
+# application, named after it (todo, home); app.conf beside it says which.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+name=$(sed -n 's/^name=//p' "$here/app.conf")
+case "${1:-}" in
+  --version|-V) printf '%s %s\n' "$name" "$(cat "$here/VERSION" 2>/dev/null || printf dev)"; exit 0 ;;
+  --help|-h) printf 'Usage: %s\nOpens %s from https://apps.codeloves.me in a window of its own.\n' "$(basename "$0")" "$name"; exit 0 ;;
+esac
+[ "$#" -eq 0 ] || { echo "$(basename "$0"): unexpected argument" >&2; exit 2; }
+if [ -x /usr/bin/python3 ]; then
+    exec /usr/bin/python3 "$here/app_window.py" --config "$here/app.conf"
+fi
+echo "$(basename "$0"): Python 3 and WebKitGTK are needed (python3-gi, gir1.2-webkit2-4.1)" >&2
+exit 1

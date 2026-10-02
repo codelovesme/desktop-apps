@@ -1,0 +1,51 @@
+name: Release desktop apps
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Window dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends xvfb python3-gi gir1.2-webkit2-4.1 dbus-x11 fonts-dejavu-core
+      - name: Test
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+      - name: Package
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          for app in todo home; do
+            python3 tools/package.py "$app" "$version" dist
+            dist/"$app"-"$version"-x86_64-linux/"$app" --version
+          done
+      - name: Smoke test each window
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = tag ]; then version="${{ github.ref_name }}"; else version=dev; fi
+          for app in todo home; do
+            mkdir -p "$RUNNER_TEMP/home-$app"
+            set +e
+            HOME="$RUNNER_TEMP/home-$app" timeout 8s xvfb-run -a dist/"$app"-"$version"-x86_64-linux/"$app"
+            result=$?
+            set -e
+            echo "$app: $result"
+            test "$result" -eq 124   # still open when the timeout closed it
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-apps
+          path: dist/*.tar.gz
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/*.tar.gz --title "${{ github.ref_name }}" --notes "To Do and Home, each in a desktop window of its own. Install with \`cdlvsm install todo\` / \`cdlvsm install home\`."

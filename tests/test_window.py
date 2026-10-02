@@ -1,0 +1,64 @@
+"""The window's rules about where it may go, without opening a window."""
+
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "window"))
+import app_window as w  # noqa: E402
+
+O = "https://apps.codeloves.me"
+
+
+class Navigation(unittest.TestCase):
+    def test_the_app_its_desktop_entry_and_signing_in(self):
+        for path in ("/desktop/todo", "/todo", "/todo/", "/todo/tags", "/id", "/id/account", "/id/oauth/google"):
+            self.assertTrue(w.allowed_navigation(O + path, O, "todo"), path)
+
+    def test_not_other_apps_the_hub_or_lookalikes(self):
+        for path in ("/", "/home", "/desktop/home", "/todos", "/todo-api", "/identity", "/desktop/connect"):
+            self.assertFalse(w.allowed_navigation(O + path, O, "todo"), path)
+
+    def test_not_other_origins(self):
+        for url in ("http://apps.codeloves.me/todo", "https://apps.codeloves.me.evil.com/todo",
+                    "https://user@apps.codeloves.me/todo", "https://apps.codeloves.me:8443/todo"):
+            self.assertFalse(w.allowed_navigation(url, O, "todo"), url)
+
+    def test_browser_sign_in_is_google_over_https_only(self):
+        self.assertTrue(w.browser_sign_in("https://accounts.google.com/o/oauth2/v2/auth?x=1"))
+        self.assertFalse(w.browser_sign_in("http://accounts.google.com/"))
+        self.assertFalse(w.browser_sign_in("https://example.com/"))
+
+
+class Origins(unittest.TestCase):
+    def test_public_or_loopback(self):
+        self.assertTrue(w.allowed_origin(O))
+        self.assertTrue(w.allowed_origin("http://127.0.0.1:8923"))
+        self.assertTrue(w.allowed_origin("http://localhost:8923"))
+        for origin in ("http://apps.codeloves.me", "https://example.com", "http://127.0.0.1", "http://10.0.0.2:8923", "http://127.0.0.1:8923/x"):
+            self.assertFalse(w.allowed_origin(origin), origin)
+
+
+class Config(unittest.TestCase):
+    def test_every_packaged_app_has_a_slug_name_and_icon(self):
+        for conf in (Path(__file__).resolve().parents[1] / "apps").glob("*/app.conf"):
+            c = w.read_config(conf)
+            self.assertEqual(c["slug"], conf.parent.name)
+            self.assertTrue((conf.parent / c["icon"]).is_file(), conf)
+
+
+class Downloads(unittest.TestCase):
+    def test_a_free_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            self.assertEqual(w.download_path(folder, "a.pdf").name, "a.pdf")
+            (folder / "a.pdf").write_text("x")
+            (folder / "a (1).pdf").write_text("x")
+            self.assertEqual(w.download_path(folder, "a.pdf").name, "a (2).pdf")
+            self.assertEqual(w.download_path(folder, "../../etc/passwd").name, "passwd")
+            self.assertEqual(w.download_path(folder, "").name, "download")
+
+
+if __name__ == "__main__":
+    unittest.main()
