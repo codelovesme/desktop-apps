@@ -31,6 +31,13 @@ class Navigation(unittest.TestCase):
         self.assertFalse(w.browser_sign_in("https://example.com/"))
 
 
+class AppId(unittest.TestCase):
+    def test_matches_the_menu_entry_cdlvsm_writes(self):
+        # cdlvsm: $XDG_DATA_HOME/applications/codelovesme-<pkg>.desktop
+        self.assertEqual(w.app_id_for("todo"), "codelovesme-todo")
+        self.assertEqual(w.app_id_for("home"), "codelovesme-home")
+
+
 class Origins(unittest.TestCase):
     def test_public_or_loopback(self):
         self.assertTrue(w.allowed_origin(O))

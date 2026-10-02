@@ -37,6 +37,11 @@ PUBLIC_ORIGIN = "https://apps.codeloves.me"
 BROWSER_SIGN_IN_HOSTS = ("accounts.google.com",)
 
 
+def app_id_for(slug: str) -> str:
+    """The desktop's name for the window: CDLVSM's menu entry is <this>.desktop."""
+    return "codelovesme-" + slug
+
+
 def read_config(path: Path) -> dict:
     """`key=value` lines: slug, name."""
     config = {}
@@ -537,8 +542,23 @@ def main() -> None:
     try:
         import gi
 
+        from gi.repository import GLib
+
         gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
         gi.require_version("WebKit2", "4.1")
+
+        # Who the window is, to the desktop — before GTK starts, or it is too
+        # late. GNOME ties a window to its menu entry by this name (the Wayland
+        # app_id, the X11 WM_CLASS) matching the entry's file name, which CDLVSM
+        # writes as codelovesme-<app>.desktop; without it the window was
+        # "Unknown" with a generic icon in Alt+Tab and the dock.
+        app_id = app_id_for(config["slug"])
+        GLib.set_prgname(app_id)
+        GLib.set_application_name(config["name"])
+        from gi.repository import Gdk
+
+        Gdk.set_program_class(app_id)
         from gi.repository import Gtk  # noqa: F401
     except (ImportError, ValueError) as error:
         raise SystemExit(
