@@ -60,5 +60,19 @@ class Downloads(unittest.TestCase):
             self.assertEqual(w.download_path(folder, "").name, "download")
 
 
+class Approvals(unittest.TestCase):
+    def test_a_yes_is_kept_and_nothing_else_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "permissions.json"
+            self.assertEqual(w.load_approvals(path), {})
+            w.save_approval(path, "UserMediaPermissionRequest")
+            self.assertEqual(w.load_approvals(path), {"UserMediaPermissionRequest": True})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            path.write_text('{"A": false, "B": "yes", "C": true}')
+            self.assertEqual(w.load_approvals(path), {"C": True})
+            path.write_text("not json")
+            self.assertEqual(w.load_approvals(path), {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,8 @@ session, apart from your browser's. Signing in with Google continues in
 your browser: approve the window there and it is signed in.
 
 The camera and microphone (To Do's photo and voice capture) are asked for
-once per window. Downloads go to your Downloads folder.
+once: a yes is remembered (in `~/.local/share/codelovesme/<app>/permissions.json`;
+delete it to be asked again), a no only until the window closes. Downloads go to your Downloads folder.
 
 ## How it works
 

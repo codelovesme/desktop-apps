@@ -96,6 +96,27 @@ def browser_sign_in(target: str) -> bool:
     return parts.scheme == "https" and parts.hostname in BROWSER_SIGN_IN_HOSTS
 
 
+def load_approvals(path: Path) -> dict:
+    """What the person said yes to, kept between windows: {kind: True}."""
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(saved, dict):
+        return {}
+    return {kind: True for kind, yes in saved.items() if isinstance(kind, str) and yes is True}
+
+
+def save_approval(path: Path, kind: str) -> None:
+    approvals = load_approvals(path)
+    approvals[kind] = True
+    try:
+        path.write_text(json.dumps(approvals), encoding="utf-8")
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def download_path(folder: Path, suggested: str) -> Path:
     """A free name in `folder`: "a.pdf", then "a (1).pdf", …"""
     name = Path(suggested or "download").name or "download"
@@ -121,7 +142,6 @@ class AppWindow:
         self.name = config["name"]
         self.origin = origin.rstrip("/")
         self.connect_state = ""
-        self.allowed = {}
 
         self.window = Gtk.Window(title=self.name)
         self.window.set_default_size(1100, 780)
@@ -143,6 +163,11 @@ class AppWindow:
         cache = Path.home() / ".cache/codelovesme" / self.slug / "webkit"
         data.mkdir(parents=True, exist_ok=True)
         cache.mkdir(parents=True, exist_ok=True)
+        # A yes is kept, so the camera and microphone are asked for once,
+        # not every time the window opens (owner, 2026-10-02). A no lasts
+        # only this window, so a slip of the finger is not for ever.
+        self.approvals_path = data.parent / "permissions.json"
+        self.allowed = load_approvals(self.approvals_path)
         manager = WebKit2.WebsiteDataManager(base_data_directory=str(data), base_cache_directory=str(cache))
         context = WebKit2.WebContext.new_with_website_data_manager(manager)
         context.connect("download-started", self.download_started)
@@ -184,7 +209,7 @@ class AppWindow:
         self.header.set_subtitle("Offline — check the connection and reopen the window")
         return False
 
-    # -- camera, microphone, notifications: asked once a window --------------
+    # -- camera, microphone, notifications: asked once, a yes kept ----------
 
     def permission_request(self, _view, request) -> bool:
         Gtk = self.Gtk
@@ -209,6 +234,8 @@ class AppWindow:
         approved = question.run() == Gtk.ResponseType.YES
         question.destroy()
         self.allowed[kind] = approved
+        if approved:
+            save_approval(self.approvals_path, kind)
         request.allow() if approved else request.deny()
         return True
 
