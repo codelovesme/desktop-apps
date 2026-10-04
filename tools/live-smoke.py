@@ -87,7 +87,7 @@ def tick():
             elif os.environ.get("E2E_VOICE") == "1" and app == "todo":
                 voice()
             else:
-                finish(0, f"OK: {config['name']} at {path}, no hub")
+                finish(0, f"OK: {config['name']} at {window.web.get_uri()}, no hub")
     run("JSON.stringify({ready: !!document.querySelector('#guest-panel %s'), path: location.pathname, hub: document.querySelectorAll('#hub-container .app').length})" % ready, checked)
     return True
 
