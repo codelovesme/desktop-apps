@@ -31,6 +31,38 @@ class Navigation(unittest.TestCase):
         self.assertFalse(w.browser_sign_in("https://example.com/"))
 
 
+class OwnSubdomain(unittest.TestCase):
+    """An application with its own subdomain (ticket 093): the window shows
+    it there, where "/" is the application alone."""
+
+    T = "https://todo.codeloves.me"
+
+    def test_the_subdomain_is_taken_only_as_its_own(self):
+        self.assertEqual(w.app_origin({"slug": "todo", "origin": self.T}, O), self.T)
+        self.assertEqual(w.app_origin({"slug": "todo"}, O), O)
+        for wrong in ("https://home.codeloves.me", "http://todo.codeloves.me", "https://todo.codeloves.me.evil.com", "https://example.com"):
+            self.assertEqual(w.app_origin({"slug": "todo", "origin": wrong}, O), O, wrong)
+
+    def test_a_loopback_test_host_becomes_slug_dot_localhost(self):
+        self.assertEqual(w.app_origin({"slug": "todo", "origin": self.T}, "http://127.0.0.1:8923"), "http://todo.localhost:8923")
+        self.assertEqual(w.app_origin({"slug": "home"}, "http://127.0.0.1:8923"), "http://127.0.0.1:8923")
+
+    def test_its_root_its_paths_and_signing_in_but_nothing_else(self):
+        for path in ("/", "/todo", "/todo/tags", "/id", "/id/account", "/desktop/todo"):
+            self.assertTrue(w.allowed_navigation(self.T + path, self.T, "todo", own=True), path)
+        for path in ("/home", "/desktop/home", "/desktop/connect"):
+            self.assertFalse(w.allowed_navigation(self.T + path, self.T, "todo", own=True), path)
+        for url in (O + "/todo", O + "/", "https://home.codeloves.me/"):
+            self.assertFalse(w.allowed_navigation(url, self.T, "todo", own=True), url)
+
+    def test_the_hub_root_stays_closed_to_a_window_on_the_hub(self):
+        self.assertFalse(w.allowed_navigation(O + "/", O, "todo"))
+
+    def test_todo_names_its_subdomain(self):
+        conf = w.read_config(Path(__file__).resolve().parents[1] / "apps" / "todo" / "app.conf")
+        self.assertEqual(w.app_origin(conf, O), self.T)
+
+
 class AppId(unittest.TestCase):
     def test_matches_the_menu_entry_cdlvsm_writes(self):
         # cdlvsm: $XDG_DATA_HOME/applications/codelovesme-<pkg>.desktop

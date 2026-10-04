@@ -69,6 +69,21 @@ def allowed_origin(origin: str) -> bool:
     )
 
 
+def app_origin(config: dict, hub: str) -> str:
+    """Where the window shows its application (ticket 093 in my-euglena-apps):
+    its own subdomain when app.conf names one — `origin=https://todo.codeloves.me`
+    — else the hub. Against a loopback test host the subdomain is
+    <slug>.localhost on the same port, which the system sends to this machine.
+    Only https://<slug>.codeloves.me is taken from app.conf."""
+    own = config.get("origin", "").rstrip("/")
+    if not own:
+        return hub
+    if hub == PUBLIC_ORIGIN:
+        return own if own == f"https://{config['slug']}.codeloves.me" else hub
+    parts = urlsplit(hub)
+    return f"{parts.scheme}://{config['slug']}.localhost:{parts.port}"
+
+
 def trusted_origin(target: str, origin: str) -> bool:
     """Only the exact configured origin may live in the window."""
     try:
@@ -84,13 +99,15 @@ def trusted_origin(target: str, origin: str) -> bool:
         return False
 
 
-def allowed_navigation(target: str, origin: str, slug: str) -> bool:
-    """The application's own addresses, its desktop entry, and signing in."""
+def allowed_navigation(target: str, origin: str, slug: str, own: bool = False) -> bool:
+    """The application's own addresses, its desktop entry, and signing in —
+    and, at its own subdomain (`own`), the subdomain's root."""
     if not trusted_origin(target, origin):
         return False
     path = urlsplit(target).path.rstrip("/") or "/"
     return (
-        path == "/desktop/" + slug
+        (own and path == "/")
+        or path == "/desktop/" + slug
         or path == "/" + slug
         or path.startswith("/" + slug + "/")
         or path == "/id"
@@ -252,7 +269,14 @@ class AppWindow:
         self.GLib, self.Gtk, self.WebKit2 = GLib, Gtk, WebKit2
         self.slug = config["slug"]
         self.name = config["name"]
-        self.origin = origin.rstrip("/")
+        # The hub (apps.codeloves.me) is where signing in through the browser
+        # happens — Google knows only that address; the window itself shows
+        # the application's own subdomain when it has one, where "/" is the
+        # application alone.
+        self.hub = origin.rstrip("/")
+        self.origin = app_origin(config, self.hub)
+        self.own = self.origin != self.hub
+        self.start = "/" if self.own else "/desktop/" + self.slug
         self.connect_state = ""
 
         self.window = Gtk.Window(title=self.name)
@@ -301,7 +325,7 @@ class AppWindow:
         self.window.add(self.web)
 
         self.start_callback()
-        self.web.load_uri(self.origin + "/desktop/" + self.slug)
+        self.web.load_uri(self.origin + self.start)
         self.window.show_all()
 
     # -- where the window may go ---------------------------------------------
@@ -319,7 +343,7 @@ class AppWindow:
         ):
             return False
         target = decision.get_navigation_action().get_request().get_uri()
-        if decision_type == WebKit2.PolicyDecisionType.NAVIGATION_ACTION and allowed_navigation(target, self.origin, self.slug):
+        if decision_type == WebKit2.PolicyDecisionType.NAVIGATION_ACTION and allowed_navigation(target, self.origin, self.slug, self.own):
             return False
         decision.ignore()
         if browser_sign_in(target):
@@ -509,13 +533,13 @@ class AppWindow:
     def connect_browser(self) -> None:
         self.connect_state = secrets.token_urlsafe(32)
         query = urlencode({"port": self.callback.server_port, "state": self.connect_state, "app": self.name})
-        webbrowser.open(self.origin + "/desktop/connect?" + query)
+        webbrowser.open(self.hub + "/desktop/connect?" + query)
         self.header.set_subtitle("Finish signing in in your browser")
 
     def accept_token(self, token: str) -> bool:
         self.header.set_subtitle("")
         self.web.run_javascript(
-            "localStorage.setItem('id:token', " + json.dumps(token) + "); location.replace('/desktop/" + self.slug + "')",
+            "localStorage.setItem('id:token', " + json.dumps(token) + "); location.replace(" + json.dumps(self.start) + ")",
             None, None,
         )
         return False
